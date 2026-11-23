@@ -1,0 +1,44 @@
+:root{--ink:#1c2822;--mute:#5d6b63;--paper:#f2f5f1;--card:#fff;--line:#d5ddd4;--green:#1f5c42;--green-soft:#e1efe7;--red:#bf3329;--red-soft:#fbe6e3;--amber:#a86a00;--amber-soft:#fdf0d4;--r:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-text-size-adjust:100%}
+main{max-width:760px;margin:0 auto;padding:12px 12px 80px}
+h1{font-size:1.35rem;margin:6px 0 12px}h2{font-size:1.05rem;margin:22px 0 8px}
+a{color:var(--green)}
+.top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin:0 0 10px}
+.card.eilig{border-left:5px solid var(--red)}
+.card h3{margin:0 0 2px;font-size:1.1rem}
+.sub{color:var(--mute);font-size:.9rem}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.grid{display:grid;gap:10px;grid-template-columns:1fr 1fr}
+.grid .full{grid-column:1/-1}
+@media(max-width:520px){.grid{grid-template-columns:1fr}}
+label{display:block;font-size:.88rem;color:var(--mute);margin-bottom:3px}
+input,textarea,select{width:100%;font:inherit;padding:11px 12px;border:1px solid #b9c5bb;border-radius:8px;background:#fff;color:var(--ink)}
+textarea{min-height:76px;resize:vertical}
+input:focus,textarea:focus,select:focus,button:focus-visible,a:focus-visible{outline:3px solid #7fb89c;outline-offset:1px}
+button{font:inherit;font-weight:600;padding:11px 16px;border-radius:8px;border:1px solid var(--green);background:var(--green);color:#fff;cursor:pointer;min-height:44px}
+button.ghost{background:#fff;color:var(--green)}
+button.danger{background:#fff;color:var(--red);border-color:var(--red)}
+button.red{background:var(--red);border-color:var(--red)}
+button.big{width:100%;font-size:1.1rem;min-height:56px}
+button.sm{padding:6px 12px;min-height:38px;font-size:.92rem}
+button:disabled{opacity:.5}
+.tag{display:inline-block;font-size:.8rem;font-weight:600;padding:2px 9px;border-radius:99px;background:var(--green-soft);color:var(--green)}
+.tag.abgelehnt{background:var(--red-soft);color:var(--red)}
+.tag.offen{background:var(--amber-soft);color:var(--amber)}
+.tag.erledigt{background:#e8e8e8;color:#444}
+.banner{background:var(--red-soft);border:2px solid var(--red);border-radius:var(--r);padding:14px;margin:0 0 10px}
+.banner b{color:var(--red)}
+.leergut{background:var(--amber-soft);border:1px solid #e3c274;border-radius:8px;padding:8px 10px;margin:8px 0;font-weight:600}
+.err{color:var(--red);font-weight:600;margin:8px 0}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.chip{background:#fff;color:var(--ink);border:1px solid var(--line);font-weight:500;padding:6px 12px;min-height:38px}
+.chip.on{background:var(--green);color:#fff;border-color:var(--green)}
+.pin{max-width:320px;margin:18vh auto 0;text-align:center}
+.pin input{font-size:2rem;text-align:center;letter-spacing:.6em;padding-left:.6em}
+.panel{border-top:1px dashed var(--line);margin-top:10px;padding-top:10px}
+.photo{max-width:100%;border-radius:8px;margin-top:8px;display:block}
+.drag{cursor:grab}.over{outline:2px dashed var(--green)}
+.addr{font-weight:600;display:block;margin:6px 0}
+@media(prefers-reduced-motion:no-preference){button{transition:background .15s}}
