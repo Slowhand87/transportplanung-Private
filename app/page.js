@@ -4,8 +4,8 @@ import { useEffect, useState, useCallback } from 'react';
 const addr = (o) => `${o.street}, ${o.zip} ${o.city}`;
 const today = () => new Date().toLocaleDateString('sv-SE');
 const STATUS = { offen: 'Offen', eingeplant: 'Eingeplant', abgelehnt: 'Abgelehnt', erledigt: 'Erledigt', pendent: 'Pendent' };
-const ROLE_NAME = { buero: 'Büro', chauffeur: 'Chauffeur', kasse: 'Kasse' };
-const TITLES = { buero: 'Transporte – Büro', chauffeur: 'Meine Touren', kasse: 'Kasse – Aufträge' };
+const ROLE_NAME = { buero: 'Werkmeister Office', chauffeur: 'Chauffeur', kasse: 'Kasse' };
+const TITLES = { buero: 'Werkmeister Office', chauffeur: 'Meine Touren', kasse: 'Kasse – Aufträge' };
 const fmtDate = (d) => (d ? new Date(d + 'T12:00:00').toLocaleDateString('de-CH', { weekday: 'short', day: 'numeric', month: 'numeric' }) : '');
 
 async function api(pin, path, opts = {}) {
