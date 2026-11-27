@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
 const addr = (o) => `${o.street}, ${o.zip} ${o.city}`;
 const today = () => new Date().toLocaleDateString('sv-SE');
@@ -89,12 +89,14 @@ function AppInner({ role, pin, onLogout, onPrint }) {
   const [error, setError] = useState('');
   const [ios, setIos] = useState(false);
   const [prices, setPrices] = useState([]);
+  const [lists, setLists] = useState({ lieferant: [], gebinde: [], abteilung: [], fahrzeug: [] });
 
   const reload = useCallback(async () => {
     try {
       const r = await api(pin, '/api/orders');
       setOrders(r.orders);
       if (role !== 'chauffeur') setPrices((await api(pin, '/api/prices')).prices);
+      if (role !== 'kasse') setLists((await api(pin, '/api/listen')).lists);
       setError('');
     } catch (e) {
       if (e.code === 401) onLogout();
@@ -118,25 +120,30 @@ function AppInner({ role, pin, onLogout, onPrint }) {
         <button className="ghost sm" onClick={onLogout}>Abmelden</button>
       </div>
       {error && <p className="err">{error}</p>}
-      {role === 'buero' ? <Buero orders={orders} pin={pin} reload={reload} prices={prices} onPrint={onPrint} /> : role === 'kasse' ? <Kasse orders={orders} pin={pin} reload={reload} prices={prices} onPrint={onPrint} /> : <Chauffeur orders={orders} pin={pin} reload={reload} ios={ios} onPrint={onPrint} />}
+      {role === 'buero' ? <Buero orders={orders} pin={pin} reload={reload} prices={prices} lists={lists} onPrint={onPrint} /> : role === 'kasse' ? <Kasse orders={orders} pin={pin} reload={reload} prices={prices} onPrint={onPrint} /> : <Chauffeur orders={orders} pin={pin} reload={reload} ios={ios} onPrint={onPrint} lists={lists} />}
     </main>
   );
 }
 
-/* ---------------- Gemeinsame Bausteine (Büro und Kasse) ---------------- */
+/* ---------------- Gemeinsame Bausteine ---------------- */
 
 const FIRMA = process.env.NEXT_PUBLIC_FIRMENNAME || 'Gärtnerei';
 const FLEX_DAYS = 3;
-const EMPTY = { customer_name: '', street: '', zip: '', city: '', phone: '', email: '', wish_day: '', date_mode: 'fix', task_type: 'liefern', delivery_type: 'transport', phone_avis: false, load_info: '', return_goods: '', urgency: 'normal' };
-const EMPTY_ITEM = { qty: '1', name: '', unit_price: '', note: '' };
+const DEF_DEPT = 'Gärtnerei';
+const DEF_VEH = 'Gärtnereibus';
+const EMPTY = { customer_name: '', street: '', zip: '', city: '', phone: '', email: '', wish_day: '', date_mode: 'fix', delivery_type: 'transport', phone_avis: false, time_from: '', time_to: '', department: DEF_DEPT, vehicle: DEF_VEH, subject: '', load_info: '', return_goods: '', urgency: 'normal' };
+const EMPTY_ITEM = { qty: '1', name: '', unit_price: '', note: '', zukauf: false };
+const TIMES = Array.from({ length: 61 }, (_, i) => { const m = 300 + i * 15; return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); });
 const num = (v) => { const n = parseFloat(String(v ?? '').replace(',', '.')); return Number.isFinite(n) ? n : 0; };
 const chf = (n) => (n == null ? '–' : Number(n).toLocaleString('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 const LIEFER = { abholung: 'Abholung', transport: 'Transport' };
-const TASK = { liefern: 'Liefern', abholen: 'Abholen', bestellen: 'Bestellen' };
+const ZK_LABEL = { zu_bestellen: 'zu bestellen', bestellt: 'bestellt', im_betrieb: 'im Betrieb', abgeschlossen: 'abgeschlossen' };
 const wishText = (d, long) =>
   d.wish_day
     ? (long ? new Date(d.wish_day + 'T12:00:00').toLocaleDateString('de-CH') : fmtDate(d.wish_day)) + (d.date_mode === 'flex' ? ` (± ${FLEX_DAYS} Tage)` : ' (Fix-Termin)')
     : d.wish_date || '';
+const parseRet = (s) => { const m = String(s || '').match(/^(\d+(?:[.,]\d+)?)\s*×\s*(.+)$/); return m ? { qty: m[1], name: m[2] } : { qty: '', name: s || '' }; };
+const opts = (list, cur) => { const names = (list || []).map((x) => x.name); return cur && !names.includes(cur) ? [...names, cur] : names; };
 
 function calc(f, prices) {
   const goods = f.items.reduce((s, i) => s + num(i.qty) * num(i.unit_price), 0);
@@ -145,28 +152,89 @@ function calc(f, prices) {
   return { goods, transport, total: goods + (transport || 0), noPrice: f.delivery_type === 'transport' && !p };
 }
 
-function OrderForm({ init, role, prices, saving, onSave, onCancel, onPrint }) {
+// PLZ und Ort: Eingabe der einen Angabe füllt die andere automatisch (Daten aus dem Internet)
+function PlzOrt({ pin, zip, city, patch }) {
+  const [sugg, setSugg] = useState([]);
+  const timer = useRef(null);
+  const seq = useRef(0);
+
+  const look = (query, onResult) => {
+    clearTimeout(timer.current);
+    const my = ++seq.current;
+    timer.current = setTimeout(async () => {
+      try {
+        const r = await api(pin, '/api/plz?' + query);
+        if (my === seq.current) onResult(r.places || []);
+      } catch { if (my === seq.current) setSugg([]); }
+    }, 350);
+  };
+  const pick = (p) => { seq.current++; patch({ zip: p.plz, city: p.ort }); setSugg([]); };
+  const result = (list) => { if (list.length === 1) pick(list[0]); else setSugg(list); };
+
+  const onZip = (e) => {
+    const v = e.target.value.replace(/\D/g, '').slice(0, 4);
+    patch({ zip: v });
+    if (v.length === 4) look('plz=' + v, result); else { seq.current++; setSugg([]); }
+  };
+  const onCity = (e) => {
+    const v = e.target.value;
+    patch({ city: v });
+    if (v.trim().length >= 2) look('ort=' + encodeURIComponent(v.trim()), result); else { seq.current++; setSugg([]); }
+  };
+
+  return (
+    <>
+      <div><label>PLZ *</label><input required inputMode="numeric" autoComplete="postal-code" value={zip} onChange={onZip} /></div>
+      <div><label>Ort *</label><input required autoComplete="address-level2" value={city} onChange={onCity} /></div>
+      {sugg.length > 0 && (
+        <div className="full sugg" role="listbox" aria-label="Vorschläge für PLZ und Ort">
+          {sugg.map((p) => <button type="button" key={p.plz + p.ort} className="ghost sm" onClick={() => pick(p)}>{p.plz} {p.ort}{p.kanton ? ` (${p.kanton})` : ''}</button>)}
+          <button type="button" className="sm sugg-x" onClick={() => setSugg([])}>Vorschläge schliessen</button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function OrderForm({ init, role, pin, lists, prices, saving, onSave, onCancel, onPrint }) {
+  const L = lists || { gebinde: [], abteilung: [], fahrzeug: [] };
   const [f, setF] = useState(() => ({
     ...Object.fromEntries(Object.keys(EMPTY).map((k) => [k, init?.[k] ?? EMPTY[k]])),
     id: init?.id,
     items: (init?.items?.length ? init.items : [EMPTY_ITEM]).map((i) => ({ ...i, qty: String(i.qty ?? ''), unit_price: String(i.unit_price ?? ''), note: i.note || '' })),
   }));
-  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
-  const setItem = (i, k, v) => setF({ ...f, items: f.items.map((it, j) => (j === i ? { ...it, [k]: v } : it)) });
-  const c = calc(f, prices);
-  const payload = () => ({ ...f, items: f.items.map((i) => ({ qty: num(i.qty), name: i.name, unit_price: num(i.unit_price), note: i.note })) });
+  const patch = (p) => setF((x) => ({ ...x, ...p }));
+  const set = (k) => (e) => patch({ [k]: e.target.value });
+  const setItem = (i, k, v) => setF((x) => ({ ...x, items: x.items.map((it, j) => (j === i ? { ...it, [k]: v } : it)) }));
+  const isB = role === 'buero', isK = role === 'kasse', isC = role === 'chauffeur';
+  const c = calc(f, prices || []);
   const isT = f.delivery_type === 'transport';
-  const setType = (t) => setF({ ...f, delivery_type: t });
+  const ret = parseRet(f.return_goods);
+  const setRet = (name, qty) => patch({ return_goods: name ? (qty ? `${qty} × ${name}` : name) : '' });
+  const payload = () => ({
+    ...f,
+    items: isC ? [] : f.items.map((i) => ({ id: i.id, qty: num(i.qty), name: i.name, unit_price: num(i.unit_price), note: i.note, zukauf: !!i.zukauf, zk_status: i.zk_status, supplier: i.supplier })),
+  });
+  const submit = (e) => {
+    e.preventDefault();
+    if (f.time_from && f.time_to && f.time_to <= f.time_from) { alert('Die Zeit «bis» muss nach «von» liegen.'); return; }
+    onSave(payload());
+  };
+  const timeSel = (k) => (
+    <select value={f[k]} onChange={set(k)}><option value="">–</option>{TIMES.map((t) => <option key={t} value={t}>{t}</option>)}</select>
+  );
+  const sw = (on, label, onClick) => (
+    <button type="button" role="switch" aria-checked={on} aria-label={label} className={'switch' + (on ? ' right' : '')} onClick={onClick}><i /></button>
+  );
 
   return (
-    <form onSubmit={(e) => { e.preventDefault(); onSave(payload()); }}>
+    <form onSubmit={submit}>
       <div className="card">
         <h3>Kundendaten</h3>
         <div className="grid">
           <div className="full"><label>Kundenname *</label><input required value={f.customer_name} onChange={set('customer_name')} /></div>
           <div className="full"><label>Strasse und Nr. *</label><input required value={f.street} onChange={set('street')} /></div>
-          <div><label>PLZ *</label><input required inputMode="numeric" value={f.zip} onChange={set('zip')} /></div>
-          <div><label>Ort *</label><input required value={f.city} onChange={set('city')} /></div>
+          <PlzOrt pin={pin} zip={f.zip} city={f.city} patch={patch} />
           <div><label>Telefon Kunde</label><input type="tel" value={f.phone} onChange={set('phone')} /></div>
           <div><label>E-Mail</label><input type="email" value={f.email} onChange={set('email')} /></div>
         </div>
@@ -175,85 +243,113 @@ function OrderForm({ init, role, prices, saving, onSave, onCancel, onPrint }) {
       <div className="card">
         <h3>Lieferung</h3>
         <div className="grid">
-          <div><label>Wunschdatum</label><input type="date" value={f.wish_day} onChange={set('wish_day')} /></div>
-          <div>
-            <label>Termin</label>
-            <div className="switchrow">
-              <span className={f.date_mode === 'fix' ? 'on' : ''}>Fix-Termin</span>
-              <button type="button" role="switch" aria-checked={f.date_mode === 'flex'} aria-label="Zwischen Fix-Termin und Toleranz in Tagen umschalten" className={'switch' + (f.date_mode === 'flex' ? ' right' : '')} onClick={() => setF({ ...f, date_mode: f.date_mode === 'flex' ? 'fix' : 'flex' })}><i /></button>
-              <span className={f.date_mode === 'flex' ? 'on' : ''}>± {FLEX_DAYS} Tage</span>
+          <div><label>{isC ? 'Datum' : 'Wunschdatum'}</label><input type="date" value={f.wish_day} onChange={set('wish_day')} /></div>
+          {!isC && (
+            <div>
+              <label>Termin</label>
+              <div className="switchrow">
+                <span className={f.date_mode === 'fix' ? 'on' : ''}>Fix-Termin</span>
+                {sw(f.date_mode === 'flex', 'Zwischen Fix-Termin und Toleranz in Tagen umschalten', () => patch({ date_mode: f.date_mode === 'flex' ? 'fix' : 'flex' }))}
+                <span className={f.date_mode === 'flex' ? 'on' : ''}>± {FLEX_DAYS} Tage</span>
+              </div>
             </div>
-          </div>
-          <div>
-            <label>Abholung oder Transport</label>
-            <div className="switchrow">
-              <span className={!isT ? 'on' : ''}>Abholung</span>
-              <button type="button" role="switch" aria-checked={isT} aria-label="Zwischen Abholung und Transport umschalten" className={'switch' + (isT ? ' right' : '')} onClick={() => setType(isT ? 'abholung' : 'transport')}><i /></button>
-              <span className={isT ? 'on' : ''}>Transport</span>
-            </div>
-          </div>
-          <div>
-            <label>Telefon-Avis</label>
-            <select value={f.phone_avis ? 'ja' : 'nein'} onChange={(e) => setF({ ...f, phone_avis: e.target.value === 'ja' })}>
-              <option value="nein">Nein</option><option value="ja">Ja</option>
-            </select>
-          </div>
-          {role === 'buero' && (
+          )}
+          {!isC && (
             <>
-              <div className="full"><label>Auftragsart (Chauffeur)</label>
-                <select value={f.task_type} onChange={set('task_type')}>
-                  <option value="liefern">Liefern – Chauffeur bringt Ware zum Kunden</option>
-                  <option value="abholen">Abholen – Chauffeur holt Ware ab</option>
-                  <option value="bestellen">Bestellen – Ware muss zuerst bestellt werden</option>
+              <div>
+                <label>Abholung oder Transport</label>
+                <div className="switchrow">
+                  <span className={!isT ? 'on' : ''}>Abholung</span>
+                  {sw(isT, 'Zwischen Abholung und Transport umschalten', () => patch({ delivery_type: isT ? 'abholung' : 'transport' }))}
+                  <span className={isT ? 'on' : ''}>Transport</span>
+                </div>
+              </div>
+              <div>
+                <label>Telefon-Avis</label>
+                <select value={f.phone_avis ? 'ja' : 'nein'} onChange={(e) => patch({ phone_avis: e.target.value === 'ja' })}>
+                  <option value="nein">Nein</option><option value="ja">Ja</option>
                 </select>
               </div>
-              <div className="full"><label>Ladung und Besonderheiten (für den Chauffeur)</label><textarea placeholder="Kran/Hebebühne, Ablageort …" value={f.load_info} onChange={set('load_info')} /></div>
-              <div><label>Leergut / Retouren mitnehmen</label><input placeholder="z. B. 3 Europaletten" value={f.return_goods} onChange={set('return_goods')} /></div>
-              <div><label>Dringlichkeit</label><select value={f.urgency} onChange={set('urgency')}><option value="normal">Normal</option><option value="eilig">Eilig</option></select></div>
+            </>
+          )}
+          {!isK && (
+            <>
+              <div><label>Zeit von</label>{timeSel('time_from')}</div>
+              <div><label>Zeit bis</label>{timeSel('time_to')}</div>
+              <div><label>Abteilung</label>
+                <select value={f.department} onChange={set('department')}>{opts(L.abteilung, f.department).map((n) => <option key={n} value={n}>{n}</option>)}</select></div>
+              <div><label>Fahrzeug</label>
+                <select value={f.vehicle} onChange={set('vehicle')}>{opts(L.fahrzeug, f.vehicle).map((n) => <option key={n} value={n}>{n}</option>)}</select></div>
+              <div className="full"><label>Transportbetreff</label><input value={f.subject} onChange={set('subject')} /></div>
+              {isB && <div className="full"><label>Ladung und Besonderheiten (für den Chauffeur)</label><textarea placeholder="Kran/Hebebühne, Ablageort …" value={f.load_info} onChange={set('load_info')} /></div>}
+              <div className="full">
+                <label>Leergut / Retouren mitnehmen</label>
+                <div className="row">
+                  <select style={{ flex: 1, minWidth: 150 }} value={ret.name} onChange={(e) => setRet(e.target.value, ret.qty || '1')}>
+                    <option value="">– kein Leergut –</option>
+                    {opts(L.gebinde, ret.name).map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                  <input style={{ width: 90 }} inputMode="decimal" placeholder="Anzahl" aria-label="Anzahl Leergut" disabled={!ret.name} value={ret.qty} onChange={(e) => setRet(ret.name, e.target.value)} />
+                </div>
+              </div>
+              {isB && <div><label>Dringlichkeit</label><select value={f.urgency} onChange={set('urgency')}><option value="normal">Normal</option><option value="eilig">Eilig</option></select></div>}
             </>
           )}
         </div>
       </div>
 
-      <div className="card">
-        <h3>Ware</h3>
-        {f.items.map((it, i) => (
-          <div className="item" key={i}>
-            <div><label>Menge</label><input inputMode="decimal" value={it.qty} onChange={(e) => setItem(i, 'qty', e.target.value)} /></div>
-            <div><label>Artikel</label><input value={it.name} onChange={(e) => setItem(i, 'name', e.target.value)} /></div>
-            <div><label>Einzelpreis CHF</label><input inputMode="decimal" value={it.unit_price} onChange={(e) => setItem(i, 'unit_price', e.target.value)} /></div>
-            <div><label>Total CHF</label><div className="ro">{chf(num(it.qty) * num(it.unit_price))}</div></div>
-            <div className="note"><label>Bemerkung zum Artikel</label><input value={it.note} onChange={(e) => setItem(i, 'note', e.target.value)} /></div>
-            {f.items.length > 1 && <button type="button" className="danger sm del" onClick={() => setF({ ...f, items: f.items.filter((_, j) => j !== i) })}>Artikel entfernen</button>}
+      {!isC && (
+        <div className="card">
+          <h3>Ware</h3>
+          {f.items.map((it, i) => (
+            <div className="item" key={i}>
+              <div><label>Menge</label><input inputMode="decimal" value={it.qty} onChange={(e) => setItem(i, 'qty', e.target.value)} /></div>
+              <div><label>Artikel</label><input value={it.name} onChange={(e) => setItem(i, 'name', e.target.value)} /></div>
+              <div><label>Einzelpreis CHF</label><input inputMode="decimal" value={it.unit_price} onChange={(e) => setItem(i, 'unit_price', e.target.value)} /></div>
+              <div><label>Total CHF</label><div className="ro">{chf(num(it.qty) * num(it.unit_price))}</div></div>
+              {isB && (
+                <div className="note switchrow">
+                  {sw(!!it.zukauf, 'Zukauf, nicht lagernd', () => setItem(i, 'zukauf', !it.zukauf))}
+                  <span className={it.zukauf ? 'on' : ''}>Zukauf, nicht lagernd</span>
+                </div>
+              )}
+              <details className="note notebox">
+                <summary>Bemerkung{it.note ? ': ' + it.note.slice(0, 40) : ''}</summary>
+                <input aria-label="Bemerkung zum Artikel" value={it.note} onChange={(e) => setItem(i, 'note', e.target.value)} />
+              </details>
+              {f.items.length > 1 && <button type="button" className="danger sm del" onClick={() => setF((x) => ({ ...x, items: x.items.filter((_, j) => j !== i) }))}>Artikel entfernen</button>}
+            </div>
+          ))}
+          <button type="button" className="ghost sm" onClick={() => setF((x) => ({ ...x, items: [...x.items, { ...EMPTY_ITEM }] }))}>Artikel hinzufügen</button>
+          <div className="sum">
+            <div><span>Warenwert</span><b>CHF {chf(c.goods)}</b></div>
+            <div><span>Transportkosten</span><b>{isT ? (c.noPrice ? 'für diese PLZ nicht hinterlegt' : 'CHF ' + chf(c.transport)) : 'CHF 0.00 (Abholung)'}</b></div>
+            <div className="tot"><span>Gesamttotal</span><b>CHF {chf(c.total)}</b></div>
           </div>
-        ))}
-        <button type="button" className="ghost sm" onClick={() => setF({ ...f, items: [...f.items, { ...EMPTY_ITEM }] })}>Artikel hinzufügen</button>
-        <div className="sum">
-          <div><span>Warenwert</span><b>CHF {chf(c.goods)}</b></div>
-          <div><span>Transportkosten</span><b>{isT ? (c.noPrice ? 'für diese PLZ nicht hinterlegt' : 'CHF ' + chf(c.transport)) : 'CHF 0.00 (Abholung)'}</b></div>
-          <div className="tot"><span>Gesamttotal</span><b>CHF {chf(c.total)}</b></div>
         </div>
-      </div>
+      )}
 
       <div className="row">
         <button type="submit" disabled={saving}>{saving ? 'Wird gespeichert …' : 'Speichern'}</button>
-        <button type="button" className="ghost" onClick={() => onPrint({ ...payload(), goods_total: c.goods, transport_cost: c.transport, total: c.total })}>Auftrag drucken</button>
+        {!isC && <button type="button" className="ghost" onClick={() => onPrint({ ...payload(), goods_total: c.goods, transport_cost: c.transport, total: c.total })}>Auftrag drucken</button>}
         {onCancel && <button type="button" className="ghost" onClick={onCancel}>Abbrechen</button>}
       </div>
     </form>
   );
 }
 
-function Details({ o }) {
+function Details({ o, ops }) {
   const items = o.items || [];
   return (
     <>
       <div>{addr(o)}</div>
       {(o.phone || o.email) && <div>{o.phone && <a href={'tel:' + o.phone}>{o.phone}</a>}{o.phone && o.email && ' · '}{o.email && <a href={'mailto:' + o.email}>{o.email}</a>}</div>}
-      <div className="sub">{o.task_type && o.task_type !== 'liefern' ? TASK[o.task_type] + ' · ' : ''}{LIEFER[o.delivery_type] || 'Transport'}{o.phone_avis ? ' · Telefon-Avis' : ''}{wishText(o) ? ' · Wunsch: ' + wishText(o) : ''}{o.plan_date ? ' · Geplant: ' + fmtDate(o.plan_date) : ''}</div>
+      <div className="sub">{LIEFER[o.delivery_type] || 'Transport'}{o.phone_avis ? ' · Telefon-Avis' : ''}{wishText(o) ? ' · Wunsch: ' + wishText(o) : ''}{o.time_from ? ` · ${o.time_from}${o.time_to ? '–' + o.time_to : ''} Uhr` : ''}{o.plan_date ? ' · Geplant: ' + fmtDate(o.plan_date) : ''}</div>
+      {ops && <div className="sub">Abteilung: {o.department || DEF_DEPT} · Fahrzeug: {o.vehicle || DEF_VEH}</div>}
+      {o.subject && <div><b>Betreff:</b> {o.subject}</div>}
       {items.length > 0 && (
         <ul className="items">
-          {items.map((i, k) => <li key={k}>{i.qty} × {i.name} · CHF {chf(i.unit_price)}{i.note && <em> – {i.note}</em>}</li>)}
+          {items.map((i, k) => <li key={k}>{i.qty} × {i.name} · CHF {chf(i.unit_price)}{i.note && <em> – {i.note}</em>}{ops && i.zukauf && <em> – Zukauf ({ZK_LABEL[i.zk_status || 'zu_bestellen']})</em>}</li>)}
         </ul>
       )}
       {o.goods_total != null && items.length > 0 && (
@@ -283,6 +379,8 @@ function PrintSheet({ d }) {
         {d.email && <tr><th>E-Mail</th><td>{d.email}</td></tr>}
         <tr><th>Lieferart</th><td>{LIEFER[d.delivery_type] || 'Transport'}</td></tr>
         {wishText(d, true) && <tr><th>Wunschdatum</th><td>{wishText(d, true)}</td></tr>}
+        {d.time_from && <tr><th>Zeit</th><td>{d.time_from}{d.time_to ? ' – ' + d.time_to : ''} Uhr</td></tr>}
+        {d.subject && <tr><th>Transportbetreff</th><td>{d.subject}</td></tr>}
         <tr><th>Telefon-Avis</th><td>{d.phone_avis ? 'Ja' : 'Nein'}</td></tr>
         {d.load_info && <tr><th>Besonderheiten</th><td>{d.load_info}</td></tr>}
         {d.return_goods && <tr><th>Leergut / Retouren</th><td>{d.return_goods}</td></tr>}
@@ -344,7 +442,6 @@ function MiniOrder({ o }) {
         <h3 style={{ margin: 0 }}>{o.customer_name}</h3>
         <span>
           <span className={'tag ' + o.status}>{STATUS[o.status]}</span>
-          {o.task_type && o.task_type !== 'liefern' && <span className="tag erledigt" style={{ marginLeft: 6 }}>{TASK[o.task_type]}</span>}
           {o.urgency === 'eilig' && <span className="tag abgelehnt" style={{ marginLeft: 6 }}>Eilig</span>}
         </span>
       </div>
@@ -410,9 +507,112 @@ function CalendarView({ orders }) {
   );
 }
 
+/* ---------------- Büro: Einstellungen und Zukauf ---------------- */
+
+function ListEditor({ title, hint, kind, list, pin, reload }) {
+  const [name, setName] = useState('');
+  const [err, setErr] = useState('');
+  const run = async (fn) => { setErr(''); try { await fn(); await reload(); } catch (e) { setErr(e.message); } };
+  return (
+    <details className="card">
+      <summary><b>{title}</b> ({list.length})</summary>
+      {hint && <p className="sub">{hint}</p>}
+      <form className="row" style={{ alignItems: 'flex-end', marginTop: 8 }} onSubmit={(e) => { e.preventDefault(); run(async () => { await api(pin, '/api/listen', { method: 'POST', body: JSON.stringify({ kind, name }) }); setName(''); }); }}>
+        <div style={{ flex: 1, minWidth: 150 }}><label>Neuer Eintrag</label><input required value={name} onChange={(e) => setName(e.target.value)} /></div>
+        <button type="submit">Hinzufügen</button>
+      </form>
+      {err && <p className="err">{err}</p>}
+      {list.map((x) => (
+        <div className="row" key={x.id} style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', padding: '6px 0', marginTop: 6 }}>
+          <span>{x.name}</span>
+          <button type="button" className="danger sm" onClick={() => confirm(`«${x.name}» löschen?`) && run(() => api(pin, '/api/listen?id=' + x.id, { method: 'DELETE' }))}>Löschen</button>
+        </div>
+      ))}
+    </details>
+  );
+}
+
+function Einstellungen({ pin, prices, lists, reload }) {
+  return (
+    <>
+      <Prices pin={pin} prices={prices} reload={reload} />
+      <ListEditor title="Lieferanten" hint="Erscheinen im Register Zukauf zur Auswahl." kind="lieferant" list={lists.lieferant} pin={pin} reload={reload} />
+      <ListEditor title="Leergut Gebinde" hint="Erscheinen beim Leergut / Retouren zur Auswahl (z. B. Europalette, Mehrwegkiste)." kind="gebinde" list={lists.gebinde} pin={pin} reload={reload} />
+      <ListEditor title="Abteilungen" hint="Standard bei neuen Aufträgen: Gärtnerei." kind="abteilung" list={lists.abteilung} pin={pin} reload={reload} />
+      <ListEditor title="Fahrzeuge" hint="Standard bei neuen Aufträgen: Gärtnereibus." kind="fahrzeug" list={lists.fahrzeug} pin={pin} reload={reload} />
+    </>
+  );
+}
+
+const ZK_ORDER = ['zu_bestellen', 'bestellt', 'im_betrieb', 'abgeschlossen'];
+const ZK_BUTTONS = [['bestellt', 'bestellt'], ['im_betrieb', 'im Betrieb'], ['abgeschlossen', 'abgeschlossen']];
+
+function Zukauf({ orders, pin, reload, lists }) {
+  const [filter, setFilter] = useState('offen');
+  const [openId, setOpenId] = useState(null);
+  const [err, setErr] = useState('');
+  const st = (i) => i.zk_status || 'zu_bestellen';
+  const all = orders.flatMap((o) => (o.items || []).filter((i) => i.zukauf && i.id).map((i) => ({ ...i, order: o })));
+  const shown = all
+    .filter((i) => (filter === 'offen' ? st(i) !== 'abgeschlossen' : st(i) === filter))
+    .sort((a, b) => ZK_ORDER.indexOf(st(a)) - ZK_ORDER.indexOf(st(b)) || a.order.customer_name.localeCompare(b.order.customer_name));
+  const upd = async (i, p) => {
+    setErr('');
+    try { await send(pin, 'PATCH', { action: 'zukauf', id: i.order.id, item_id: i.id, ...p }); await reload(); } catch (e) { setErr(e.message); }
+  };
+
+  return (
+    <>
+      <div className="chips">
+        {[['offen', 'Offene'], ['zu_bestellen', 'Zu bestellen'], ['bestellt', 'Bestellt'], ['im_betrieb', 'Im Betrieb'], ['abgeschlossen', 'Abgeschlossen']].map(([k, label]) => (
+          <button key={k} className={'chip' + (filter === k ? ' on' : '')} onClick={() => setFilter(k)}>{label}</button>
+        ))}
+      </div>
+      {err && <p className="err">{err}</p>}
+      {shown.length === 0 && <p className="sub">Keine Artikel in dieser Ansicht. Artikel markieren Sie im Auftrag mit «Zukauf, nicht lagernd».</p>}
+      {shown.map((i) => {
+        const o = i.order;
+        const isOpen = openId === i.id;
+        return (
+          <div className="card" key={i.id}>
+            <button type="button" className="linkrow" aria-expanded={isOpen} onClick={() => setOpenId(isOpen ? null : i.id)}>
+              <b>{i.qty} × {i.name}</b>
+              <span className={'tag' + (st(i) === 'zu_bestellen' ? ' offen' : '')}>{ZK_LABEL[st(i)]}</span>
+            </button>
+            <div className="row" style={{ marginTop: 8 }}>
+              <select aria-label="Lieferant" style={{ flex: 1, minWidth: 160 }} value={i.supplier || ''} onChange={(e) => upd(i, { supplier: e.target.value })}>
+                <option value="">Lieferant wählen</option>
+                {opts(lists.lieferant, i.supplier).map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+            <div className="row" style={{ marginTop: 8 }}>
+              {ZK_BUTTONS.map(([k, label]) => (
+                <button key={k} type="button" className={'sm' + (st(i) === k ? '' : ' ghost')} aria-pressed={st(i) === k} onClick={() => upd(i, { zk_status: st(i) === k ? 'zu_bestellen' : k })}>{label}</button>
+              ))}
+            </div>
+            {isOpen && (
+              <div className="panel">
+                <b>Auftrag</b>
+                <div>{o.customer_name} · <span className={'tag ' + o.status}>{STATUS[o.status]}</span></div>
+                <div>{addr(o)}</div>
+                {(o.phone || o.email) && <div className="sub">{o.phone}{o.phone && o.email ? ' · ' : ''}{o.email}</div>}
+                <div className="sub">Termin: {o.plan_date ? fmtDate(o.plan_date) : wishText(o) || 'kein Datum'}</div>
+                <b style={{ display: 'block', marginTop: 8 }}>Artikel</b>
+                <div>Menge: {i.qty} · Artikel: {i.name}</div>
+                <div>Einzelpreis: CHF {chf(i.unit_price)} · Total: CHF {chf(num(i.qty) * num(i.unit_price))}</div>
+                {i.note && <div>Bemerkung: {i.note}</div>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 /* ---------------- Büro ---------------- */
 
-function Buero({ orders, pin, reload, prices, onPrint }) {
+function Buero({ orders, pin, reload, prices, lists, onPrint }) {
   const [tab, setTab] = useState('kalender');
   const [editing, setEditing] = useState(null);
   const [nonce, setNonce] = useState(0);
@@ -424,10 +624,11 @@ function Buero({ orders, pin, reload, prices, onPrint }) {
 
   const declined = orders.filter((o) => o.status === 'abgelehnt' && !o.decline_ack);
   const pending = orders.filter((o) => o.status === 'pendent');
+  const zkNew = orders.flatMap((o) => (o.items || []).filter((i) => i.zukauf && (i.zk_status || 'zu_bestellen') === 'zu_bestellen')).length;
   const rank = (o) => (o.status === 'pendent' ? 0 : o.status === 'erledigt' ? 2 : 1);
   const shown = orders
     .filter((o) => filter === 'alle' || o.status === filter)
-    .filter((o) => !q || JSON.stringify([o.customer_name, o.street, o.city, o.zip, o.load_info, o.phone, o.email, o.items]).toLowerCase().includes(q.toLowerCase()))
+    .filter((o) => !q || JSON.stringify([o.customer_name, o.street, o.city, o.zip, o.load_info, o.subject, o.phone, o.email, o.items]).toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => rank(a) - rank(b) || (b.created_at > a.created_at ? 1 : -1));
 
   const act = async (fn) => { setErr(''); try { await fn(); await reload(); } catch (e) { setErr(e.message); } };
@@ -452,6 +653,8 @@ function Buero({ orders, pin, reload, prices, onPrint }) {
     setSaving(false);
   }
 
+  const tabBtn = (k, label) => <button className={'chip' + (tab === k ? ' on' : '')} onClick={() => go(k)}>{label}</button>;
+
   return (
     <>
       {declined.map((o) => (
@@ -467,26 +670,28 @@ function Buero({ orders, pin, reload, prices, onPrint }) {
       ))}
       {pending.length > 0 && (
         <div className="banner info" role="status">
-          <b>{pending.length} {pending.length === 1 ? 'neuer Auftrag' : 'neue Aufträge'} von der Kasse zu bearbeiten</b>
+          <b>{pending.length} {pending.length === 1 ? 'neuer Auftrag' : 'neue Aufträge'} zu bearbeiten</b>
           <div style={{ marginTop: 8 }}><button className="sm" onClick={() => { setFilter('pendent'); go('liste'); }}>Anzeigen</button></div>
         </div>
       )}
       {err && <p className="err">{err}</p>}
 
       <div className="chips">
-        <button className={'chip' + (tab === 'kalender' ? ' on' : '')} onClick={() => go('kalender')}>Kalender</button>
-        <button className={'chip' + (tab === 'neu' ? ' on' : '')} onClick={() => go('neu')}>Neuer Auftrag</button>
-        <button className={'chip' + (tab === 'liste' ? ' on' : '')} onClick={() => go('liste')}>Aufträge{pending.length ? ` (${pending.length} pendent)` : ''}</button>
+        {tabBtn('kalender', 'Kalender')}
+        {tabBtn('neu', 'Neuer Auftrag')}
+        {tabBtn('liste', 'Aufträge' + (pending.length ? ` (${pending.length} pendent)` : ''))}
+        {tabBtn('zukauf', 'Zukauf' + (zkNew ? ` (${zkNew})` : ''))}
+        {tabBtn('einstellungen', 'Einstellungen')}
       </div>
       {msg && <div className="banner info" role="status">{msg}</div>}
 
       {tab === 'kalender' && <CalendarView orders={orders} />}
 
-      {tab === 'neu' && <OrderForm key={'neu' + nonce} init={{}} role="buero" prices={prices} saving={saving} onSave={save} onPrint={onPrint} />}
+      {tab === 'neu' && <OrderForm key={'neu' + nonce} init={{}} role="buero" pin={pin} lists={lists} prices={prices} saving={saving} onSave={save} onPrint={onPrint} />}
 
       {tab === 'liste' && (
         <>
-          {editing && <OrderForm key={editing.id} init={editing} role="buero" prices={prices} saving={saving} onSave={save} onCancel={() => setEditing(null)} onPrint={onPrint} />}
+          {editing && <OrderForm key={editing.id} init={editing} role="buero" pin={pin} lists={lists} prices={prices} saving={saving} onSave={save} onCancel={() => setEditing(null)} onPrint={onPrint} />}
           <input type="search" placeholder="Suchen (Kunde, Ort, Artikel …)" value={q} onChange={(e) => setQ(e.target.value)} />
           <div className="chips">
             {['pendent', 'offen', 'eingeplant', 'abgelehnt', 'erledigt', 'alle'].map((s) => (
@@ -502,7 +707,7 @@ function Buero({ orders, pin, reload, prices, onPrint }) {
                 <h3>{o.customer_name}</h3>
                 <span><span className={'tag ' + o.status}>{STATUS[o.status]}</span>{o.urgency === 'eilig' && <span className="tag abgelehnt" style={{ marginLeft: 6 }}>Eilig</span>}</span>
               </div>
-              <Details o={o} />
+              <Details o={o} ops />
               {o.status === 'abgelehnt' && <div className="sub">Abgelehnt: {o.decline_reason}</div>}
               {o.driver_note && <div><b>Chauffeur:</b> {o.driver_note}</div>}
               {o.photo_url && <a href={o.photo_url} target="_blank" rel="noreferrer"><img className="photo" src={o.photo_url} alt={'Ablieferfoto ' + o.customer_name} loading="lazy" /></a>}
@@ -516,11 +721,12 @@ function Buero({ orders, pin, reload, prices, onPrint }) {
               </div>
             </div>
           ))}
-
-          <h2>Einstellungen</h2>
-          <Prices pin={pin} prices={prices} reload={reload} />
         </>
       )}
+
+      {tab === 'zukauf' && <Zukauf orders={orders} pin={pin} reload={reload} lists={lists} />}
+
+      {tab === 'einstellungen' && <Einstellungen pin={pin} prices={prices} lists={lists} reload={reload} />}
     </>
   );
 }
@@ -550,7 +756,7 @@ function Kasse({ orders, pin, reload, prices, onPrint }) {
   }
 
   const match = (o) => !q || JSON.stringify([o.customer_name, o.street, o.city, o.zip, o.phone, o.items]).toLowerCase().includes(q.toLowerCase());
-  const pending = orders.filter((o) => o.status === 'pendent');
+  const pending = orders.filter((o) => o.status === 'pendent' || o.status === 'abgelehnt');
   const shown = pending.filter(match);
 
   return (
@@ -565,19 +771,20 @@ function Kasse({ orders, pin, reload, prices, onPrint }) {
 
       {tab === 'kalender' && <CalendarView orders={orders} />}
 
-      {tab === 'neu' && <OrderForm key={'neu' + nonce} init={{}} role="kasse" prices={prices} saving={saving} onSave={save} onPrint={onPrint} />}
+      {tab === 'neu' && <OrderForm key={'neu' + nonce} init={{}} role="kasse" pin={pin} prices={prices} saving={saving} onSave={save} onPrint={onPrint} />}
 
       {tab === 'pendent' && (
         <>
           <input type="search" placeholder="Pendente Aufträge suchen" value={q} onChange={(e) => setQ(e.target.value)} />
           {shown.length === 0 && <p className="sub">Keine pendenten Aufträge.</p>}
           {shown.map((o) => (
-            <div className="card pend" key={o.id}>
+            <div className={'card' + (o.status === 'abgelehnt' ? ' eilig' : ' pend')} key={o.id}>
               <div className="row" style={{ justifyContent: 'space-between' }}>
                 <h3>{o.customer_name}</h3>
                 <span className={'tag ' + o.status}>{STATUS[o.status]}</span>
               </div>
               <Details o={o} />
+              {o.status === 'abgelehnt' && <div className="sub"><b>Abgelehnt:</b> {o.decline_reason}</div>}
               <div className="row" style={{ marginTop: 10 }}><button className="sm ghost" onClick={() => onPrint(printable(o))}>Drucken</button></div>
             </div>
           ))}
@@ -601,16 +808,29 @@ const dmy = (d) => d.slice(8, 10) + '.' + d.slice(5, 7) + '.' + d.slice(0, 4);
 const eff = (o) => o.plan_date || o.wish_day || null;
 const clock = (iso) => new Date(iso).toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit' });
 
-function Chauffeur({ orders, pin, reload, ios, onPrint }) {
+function Chauffeur({ orders, pin, reload, ios, onPrint, lists }) {
   const [tab, setTab] = useState('tour');
   const [day, setDay] = useState(today());
   const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
   const [dragId, setDragId] = useState(null);
   const [trips, setTrips] = useState([]);
+  const [nonce, setNonce] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [, setTick] = useState(0);
 
   const loadTrips = useCallback(async () => { try { setTrips((await api(pin, '/api/fahrten')).trips); } catch {} }, [pin]);
   useEffect(() => { loadTrips(); }, [loadTrips]);
   const active = trips.find((t) => !t.ended_at);
+  const activeId = active ? active.id : null;
+  useEffect(() => {
+    if (!activeId) return;
+    const t = setInterval(() => setTick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [activeId]);
+  const secs = active ? Math.max(0, Math.floor((Date.now() - new Date(active.started_at).getTime()) / 1000)) : 0;
+  const p2 = (v) => String(v).padStart(2, '0');
+  const timer = `${p2(Math.floor(secs / 3600))}:${p2(Math.floor((secs % 3600) / 60))}:${p2(secs % 60)}`;
 
   const open = orders.filter((o) => o.status === 'offen' || o.status === 'eingeplant').sort((a, b) => a.sort_order - b.sort_order);
   const dayList = open.filter((o) => eff(o) === day);
@@ -619,8 +839,7 @@ function Chauffeur({ orders, pin, reload, ios, onPrint }) {
   const act = async (fn) => { setErr(''); try { await fn(); await reload(); } catch (e) { setErr(e.message); throw e; } };
   const tripAct = async (body) => {
     setErr('');
-    try { await api(pin, '/api/fahrten', { method: 'POST', body: JSON.stringify(body) }); await loadTrips(); await reload(); }
-    catch (e) { setErr(e.message); }
+    try { await api(pin, '/api/fahrten', { method: 'POST', body: JSON.stringify(body) }); await loadTrips(); } catch (e) { setErr(e.message); }
   };
   const reorder = (list, from, to) => {
     if (to < 0 || to >= list.length || from === to) return;
@@ -628,6 +847,13 @@ function Chauffeur({ orders, pin, reload, ios, onPrint }) {
     ids.splice(to, 0, ids.splice(from, 1)[0]);
     act(() => send(pin, 'PATCH', { action: 'reorder', ids })).catch(() => {});
   };
+  async function saveNew(payload) {
+    setSaving(true); setErr(''); setMsg('');
+    try { await send(pin, 'POST', payload); setNonce((x) => x + 1); setMsg('Auftrag gespeichert und ans Büro übermittelt.'); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+    catch (e) { setErr(e.message); }
+    setSaving(false);
+  }
+  const go = (t) => { setTab(t); setMsg(''); setErr(''); };
 
   const routeUrl = 'https://www.google.com/maps/dir//' + dayList.map((o) => encodeURIComponent(addr(o))).join('/');
 
@@ -646,39 +872,46 @@ function Chauffeur({ orders, pin, reload, ios, onPrint }) {
   return (
     <>
       <div className="chips">
-        <button className={'chip' + (tab === 'kalender' ? ' on' : '')} onClick={() => setTab('kalender')}>Kalender</button>
-        <button className={'chip' + (tab === 'tour' ? ' on' : '')} onClick={() => setTab('tour')}>Tour</button>
-        <button className={'chip' + (tab === 'fahrten' ? ' on' : '')} onClick={() => setTab('fahrten')}>Fahrten</button>
+        <button className={'chip' + (tab === 'kalender' ? ' on' : '')} onClick={() => go('kalender')}>Kalender</button>
+        <button className={'chip' + (tab === 'tour' ? ' on' : '')} onClick={() => go('tour')}>Tour</button>
+        <button className={'chip' + (tab === 'neu' ? ' on' : '')} onClick={() => go('neu')}>Neuer Auftrag</button>
+        <button className={'chip' + (tab === 'fahrten' ? ' on' : '')} onClick={() => go('fahrten')}>Fahrten</button>
       </div>
+      {msg && <div className="banner info" role="status">{msg}</div>}
       {err && <p className="err">{err}</p>}
 
-      {tab === 'kalender' ? (
-        <CalendarView orders={orders} />
-      ) : tab === 'fahrten' ? (
-        <Fahrten pin={pin} trips={trips} reloadTrips={loadTrips} onPrint={onPrint} />
-      ) : (
+      {tab === 'kalender' && <CalendarView orders={orders} />}
+
+      {tab === 'neu' && <OrderForm key={'neu' + nonce} init={{}} role="chauffeur" pin={pin} lists={lists} saving={saving} onSave={saveNew} />}
+
+      {tab === 'fahrten' && <Fahrten pin={pin} trips={trips} reloadTrips={loadTrips} onPrint={onPrint} />}
+
+      {tab === 'tour' && (
         <>
           <div className="card">
             <label htmlFor="day">Tag</label>
             <input id="day" type="date" value={day} onChange={(e) => e.target.value && setDay(e.target.value)} />
-            {active && <div className="banner info" style={{ marginTop: 10 }}><b>Fahrt läuft seit {clock(active.started_at)} Uhr</b></div>}
+            {active ? (
+              <>
+                <div className="banner info" style={{ marginTop: 10 }}>
+                  <div>Fahrt läuft seit {clock(active.started_at)} Uhr</div>
+                  <div className="timer" aria-live="off">{timer}</div>
+                </div>
+                <button className="big red" type="button" onClick={() => {
+                  const txt = dayList.length ? `Für diesen Tag sind noch ${dayList.length} Aufträge offen. Fahrt trotzdem beenden?` : 'Fahrt beenden? Die Zeit wird gestoppt und im Register Fahrten abgelegt.';
+                  if (confirm(txt)) tripAct({ action: 'end' });
+                }}>Fahrt beenden</button>
+              </>
+            ) : (
+              <div style={{ marginTop: 10 }}><button className="big" type="button" onClick={() => tripAct({ action: 'start' })}>Fahrt starten</button></div>
+            )}
             <div style={{ marginTop: 10 }}>
               {dayList.length ? (
-                <a href={routeUrl} target="_blank" rel="noreferrer" style={{ textDecoration: 'none' }} onClick={() => { if (!active) tripAct({ action: 'start' }); }}>
-                  <button className="big" type="button">{active ? 'Tagesroute erneut öffnen' : `Fahrt starten und Tagesroute öffnen (${dayList.length} Stopps)`}</button>
-                </a>
+                <a href={routeUrl} target="_blank" rel="noreferrer" style={{ textDecoration: 'none' }}><button className="big ghost" type="button">Tagesroute in Google Maps öffnen ({dayList.length} Stopps)</button></a>
               ) : (
-                <button className="big" disabled>Fahrt starten und Tagesroute öffnen</button>
+                <button className="big ghost" disabled>Tagesroute in Google Maps öffnen</button>
               )}
             </div>
-            {active && (
-              <div style={{ marginTop: 10 }}>
-                <button className="big red" type="button" onClick={() => {
-                  const txt = dayList.length ? `Für diesen Tag sind noch ${dayList.length} Aufträge offen. Fahrt trotzdem beenden?` : 'Fahrt beenden? Alle Aufträge sind erledigt.';
-                  if (confirm(txt)) tripAct({ action: 'end' });
-                }}>Fahrt beenden (alle Aufträge fertig)</button>
-              </div>
-            )}
           </div>
 
           <h2>Geplant für {fmtDate(day)}</h2>
@@ -700,10 +933,10 @@ function FahrtenSheet({ d }) {
       <h1>{FIRMA} – Fahrtenübersicht</h1>
       <p className="sub">Monat {d.label} · gedruckt am {new Date().toLocaleDateString('de-CH')}</p>
       <table className="pt items-t">
-        <thead><tr><th>Datum</th><th>Abladestellen</th><th className="r">Zeit (Std:Min)</th></tr></thead>
+        <thead><tr><th>Datum</th><th>Beginn</th><th>Ende</th><th className="r">Zeit (Std:Min)</th></tr></thead>
         <tbody>
-          {d.trips.map((t) => <tr key={t.id}><td>{dmy(t.day)}</td><td>{t.stops}</td><td className="r">{hhmm(t.minutes)}</td></tr>)}
-          <tr className="tot"><td colSpan={2} className="r">Total Stunden</td><td className="r">{hhmm(d.totMin)}</td></tr>
+          {d.trips.map((t) => <tr key={t.id}><td>{dmy(t.day)}</td><td>{clock(t.started_at)}</td><td>{clock(t.ended_at)}</td><td className="r">{hhmm(t.minutes)}</td></tr>)}
+          <tr className="tot"><td colSpan={3} className="r">Total Stunden</td><td className="r">{hhmm(d.totMin)}</td></tr>
         </tbody>
       </table>
       <div className="sign"><div>Name, Unterschrift Chauffeur</div></div>
@@ -740,9 +973,10 @@ function Fahrten({ pin, trips, reloadTrips, onPrint }) {
       {list.length === 0 && <p className="sub">Für diesen Monat gibt es noch keine abgeschlossenen Fahrten.</p>}
       {list.map((t) => (
         <div className="card" key={t.id}>
-          <h3 style={{ margin: 0 }}>{dmy(t.day)}</h3>
-          <label style={{ marginTop: 8 }}>Abladestellen</label>
-          <textarea defaultValue={t.stops || ''} key={'s' + t.id + (t.stops || '')} onBlur={(e) => e.target.value !== (t.stops || '') && save(t, { stops: e.target.value })} />
+          <div className="row" style={{ justifyContent: 'space-between' }}>
+            <h3 style={{ margin: 0 }}>{dmy(t.day)}</h3>
+            <span className="sub">{clock(t.started_at)} – {clock(t.ended_at)} Uhr</span>
+          </div>
           <div className="row" style={{ marginTop: 8, alignItems: 'flex-end' }}>
             <div style={{ width: 130 }}>
               <label>Zeit (Std:Min)</label>
@@ -791,7 +1025,6 @@ function Card({ o, i, n, pin, ios, act, onMove, drag }) {
   const [blob, setBlob] = useState(null);
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
-  const holen = o.task_type === 'abholen';
 
   const mapUrl = ios
     ? 'https://maps.apple.com/?daddr=' + encodeURIComponent(addr(o))
@@ -822,16 +1055,15 @@ function Card({ o, i, n, pin, ios, act, onMove, drag }) {
     <div className={'card drag' + (o.urgency === 'eilig' ? ' eilig' : '')} {...drag}>
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <h3>{o.customer_name}</h3>
-        <span>
-          <span className={'tag' + (holen ? ' pendent' : '')}>{holen ? 'Abholen' : 'Liefern'}</span>
-          {o.urgency === 'eilig' && <span className="tag abgelehnt" style={{ marginLeft: 6 }}>Eilig</span>}
-        </span>
+        {o.urgency === 'eilig' && <span className="tag abgelehnt">Eilig</span>}
       </div>
-      <div className="sub">{holen ? 'Abholen bei' : 'Liefern an'}</div>
       <a className="addr" href={mapUrl} target="_blank" rel="noreferrer">{addr(o)}</a>
       {o.phone && <a href={'tel:' + o.phone}>Anrufen: {o.phone}</a>}
+      {o.time_from && <div className="sub">Zeit: {o.time_from}{o.time_to ? ' – ' + o.time_to : ''} Uhr</div>}
+      <div className="sub">{o.department || DEF_DEPT} · {o.vehicle || DEF_VEH}</div>
+      {o.subject && <div style={{ marginTop: 6 }}><b>{o.subject}</b></div>}
       {o.load_info && <div style={{ marginTop: 6 }}>{o.load_info}</div>}
-      {(o.items || []).length > 0 && <ul className="items">{o.items.map((i, k) => <li key={k}>{i.qty} × {i.name}{i.note && <em> – {i.note}</em>}</li>)}</ul>}
+      {(o.items || []).length > 0 && <ul className="items">{o.items.map((it, k) => <li key={k}>{it.qty} × {it.name}{it.note && <em> – {it.note}</em>}</li>)}</ul>}
       {o.return_goods && <div className="leergut">Leergut mitnehmen: {o.return_goods}</div>}
       {!o.wish_day && o.wish_date && <div className="sub">Kundenwunsch: {o.wish_date}</div>}
 
@@ -850,7 +1082,7 @@ function Card({ o, i, n, pin, ios, act, onMove, drag }) {
 
       {panel === 'done' && (
         <div className="panel">
-          <label>{holen ? 'Foto der abgeholten Ware' : 'Foto der abgeladenen Ware'}</label>
+          <label>Foto der abgeladenen Ware</label>
           <input type="file" accept="image/*" capture="environment" onChange={pick} />
           {preview && <img className="photo" src={preview} alt="Vorschau" />}
           <label style={{ marginTop: 8 }}>Notiz (optional)</label>
